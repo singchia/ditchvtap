@@ -10,6 +10,21 @@
 #include "ditch.h"
 #include "ditch_dev.h"
 
+/* ditch CURD */
+static void ditch_hash_add(struct ditch_dev *ditch)
+{
+    struct ditch_port *port = ditch->port;
+    const unsigned char *addr = ditch->dev->dev_addr;
+    hlist_add_head_rcu(&ditch->hlist, &port->ditch_hash[addr[5]]);
+}
+
+static void ditch_hash_del(struct ditch_dev *ditch, bool sync)
+{
+    hlist_del_rcu(&ditch->hlist);
+    if (sync)
+        synchronize_rcu();
+}
+
 static struct ditch_dev *ditch_hash_lookup(const struct ditch_port *port,
                     const unsigned char *addr)
 {
@@ -21,6 +36,23 @@ static struct ditch_dev *ditch_hash_lookup(const struct ditch_port *port,
     return NULL;
 }
 
+static struct ditch_dev *ditch_rss_lookup(const struct ditch_port *port,
+                    struct sk_buff *skb)
+{
+    struct ditch_dev *ditch;
+    // TODO
+    return ditch;
+}
+
+static void ditch_hash_change_addr(struct ditch_dev *ditch,
+                    const unsigned char *addr)
+{
+    ditch_hash_del(ditch, true);
+    memcpy(ditch->dev->dev_addr, addr, ETH_ALEN);
+    ditch_hash_add(ditch);
+}
+
+/* addr check */
 static int ditch_addr_busy(const struct ditch_port *port,
                     const unsigned char *addr)
 {
@@ -68,18 +100,68 @@ static int ditch_open(struct net_device *dev)
     if (ditch_addr_busy(ditch->port, dev->dev_addr))
         goto out;
 
-    err = dev_uc_add(lowerdev, dev->dev_addr);
-    if (err < 0)
-        goto out;
-
-    if (dev->flags & IFF_ALLMULTI) {
-        err = dev_set_allmulti(lowerdev, 1);
-        if (err < 0)
-            goto del_unicast;
-    }
+    ditch_hash_add(ditch);
+    return 0;
 
 out:
     return err;
+}
+
+static int ditch_stop(struct net_device *dev)
+{
+    struct ditch_dev *ditch = netdev_priv(dev);
+    struct net_device *lowerdev = ditch->lowerdev;
+
+    ditch_hash_del();
+    return 0;
+}
+
+netdev_tx_t ditch_start_xmit(struct sk_buff *skb,
+                    struct net_device *dev)
+{
+    int ret;
+    const struct ditch_dev *ditch = netdev_priv(dev);
+    skb->dev = ditch->lowerdev;
+    ret = dev_queue_xmit(skb);
+    if (likely(ret == NET_XMIT_SUCCESS || ret == NET_XMIT_CN)) {
+        struct ditch_pcpu_stats *pcpu_stats;
+        u64_stats_update_begin(&pcpu_stats->syncp);
+        pcpu_stats->tx_packets++;
+        pcpu_stats->tx_bytes += len;
+        u64_stats_update_end(&pcpu_stats->syncp);
+    } else {
+        this_cpu_inc(ditch->pcpu_stats->tx_dropped);
+    }
+    return ret;
+}
+
+static int ditch_change_mtu(struct net_device *dev, int new_mtu)
+{
+    struct ditch_dev *ditch = netdev_priv(dev);
+    if (new_mtu < 68 || ditch->lowerdev->mtu < new_mtu)
+        return -EINVAL;
+    dev->mtu = new_mtu;
+    return 0;
+}
+
+static int ditch_set_mac_address(struct net_device *dev, void *p)
+{
+    struct ditch_dev *ditch = newdev_priv(dev);
+    struct net_device *lowerdev = vlan->lowerdev;
+    struct sockaddr *addr = p;
+
+    if (!is_valid_ether_addr(addr->sa_data))
+        return -EADDRNOTAVAIL;
+
+    if (!(dev->flags) & IFF_UP) {
+        memcpy(dev->dev_addr, addr->sa_data, ETH_ALEN);
+    } else {
+        if (ditch_addr_busy(ditch->port, addr->sa_data))
+            return -EBUSY;
+
+        ditch_hash_change_addr(ditch, addr->sa_data);
+    }
+    return 0;
 }
 
 const struct net_device_ops ditch_netdev_ops = {
@@ -92,10 +174,6 @@ const struct net_device_ops ditch_netdev_ops = {
     .ndo_change_rx_flags    = ditch_change_rx_flags,
     .ndo_set_mac_address    = ditch_set_mac_address,
     .ndo_set_rx_mode        = ditch_set_rx_mode,
-    //.ndo_get_stats64        = ditch_get_stats64,
-    .ndo_validate_addr      = ditch_validate_addr,
-    .ndo_vlan_rx_add_vid    = ditch_vlan_rx_add_vid,
-    .ndo_vlan_rx_kill_vid   = ditch_vlan_rx_kill_vid,
 };
 
 /* net device hard header ops */

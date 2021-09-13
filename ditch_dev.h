@@ -26,9 +26,9 @@
  *	@rx_multicast: number of received multicast packets
  *	@tx_packets: number of transmitted packets
  *	@tx_bytes: number of transmitted bytes
- *	@syncp: synchronization point for 64bit counters
  *	@rx_errors: number of rx errors
  *	@tx_dropped: number of tx dropped packets
+ *	@syncp: synchronization point for 64bit counters
  */
 struct ditch_pcpu_stats {
 	u64                     rx_packets;
@@ -39,6 +39,19 @@ struct ditch_pcpu_stats {
 	u32                     rx_errors;
 	u32                     tx_dropped;
 	struct u64_stats_sync	syncp;
+};
+
+#define DITCH_MAC_FILTER_SIZE (1 << BITS_PER_BYTE)
+
+struct ditch_dev {
+    struct net_device   *dev;
+    struct hlist_node   hlist;
+    struct list_head    list;
+    struct ditch_port   *port;
+    struct net_device   *lowerdev;
+    struct ditch_pcpu_stats __percpu *pcpu_stats;
+
+    DECLARE_BITMAP(ditch_mac_filter, DITCH_MAC_FILTER_SIZE);
 };
 
 #endif /* _LINUX_DITCH_DEV_H */
