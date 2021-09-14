@@ -30,7 +30,7 @@ enum {
 struct ditch_port {
     struct net_device   *dev;
     struct hlist_head   ditch_hash[DITCH_HASH_SIZE];
-    struct list_head    ditchs;
+    struct list_head    ditches;
     int                 count;
 	struct rcu_head     rcu;
 };

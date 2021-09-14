@@ -11,6 +11,9 @@
 #include "ditch_dev.h"
 #include <linux/if_arp.h>
 #include <linux/notifier.h>
+#include <net/rtnetlink.h>
+#include <linux/etherdevice.h>
+#include <linux/module.h>
 
 extern const struct net_device_ops ditch_netdev_ops;
 extern const struct header_ops ditch_hard_header_ops;
@@ -50,12 +53,13 @@ static int ditch_broadcast_one(struct sk_buff *skb,
                     const struct ditch_dev *ditch,
                     const struct ethhdr *eth)
 {
+    struct net_device *dev;
     if (!skb)
         return NET_RX_DROP;
 
-    struct net_device *dev = ditch->dev;
+    dev = ditch->dev;
     skb->dev = dev;
-    if (ether_addr_euqal_64bits(eth->h_dest, dev->broadcast))
+    if (ether_addr_equal_64bits(eth->h_dest, dev->broadcast))
         skb->pkt_type = PACKET_BROADCAST;
     else
         skb->pkt_type = PACKET_MULTICAST;
@@ -107,12 +111,15 @@ static rx_handler_result_t ditch_handle_frame(struct sk_buff **pskb)
     }
 
     ditch = ditch_rss_lookup(port, skb);
+    if (ditch == NULL) {
+        return RX_HANDLER_PASS;
+    }
     dev = ditch->dev;
     if (unlikely(!(dev->flags & IFF_UP))) {
         kfree_skb(skb);
         return RX_HANDLER_CONSUMED;
     }
-    len = skb->len + ETH_ELEN;
+    len = skb->len + ETH_HLEN;
     skb = skb_share_check(skb, GFP_ATOMIC);
     if (!skb)
         goto out;
@@ -123,20 +130,10 @@ static rx_handler_result_t ditch_handle_frame(struct sk_buff **pskb)
 
 out:
     ditch_count_rx(ditch, len, ret == NET_RX_SUCCESS, 0);
-    return RX_HANDLER_CONSUMERD;
+    return RX_HANDLER_CONSUMED;
 }
 
 /* ditch port */
-static struct ditch_port *ditch_port_get_rcu(const struct net_device *dev)
-{
-    return rcu_dereference(dev->rx_handler_data);
-}
-
-static struct ditch_port *ditch_port_get_rtnl(const struct net_device *dev)
-{
-    return rtnl_dereference(dev->rx_handler_data);
-}
-
 static int ditch_port_create(struct net_device *dev)
 {
     struct ditch_port *port;
@@ -146,7 +143,7 @@ static int ditch_port_create(struct net_device *dev)
     if (dev->type != ARPHRD_ETHER || dev->flags & IFF_LOOPBACK)
         return -EINVAL;
 
-    port = kzalloc(sizeof(*port), GPL_KERNEL);
+    port = kzalloc(sizeof(*port), GFP_KERNEL);
     if (port == NULL)
         return -ENOMEM;
 
@@ -163,7 +160,7 @@ static int ditch_port_create(struct net_device *dev)
     return err;
 }
 
-static int ditch_port_destroy(struct net_device *dev)
+static void ditch_port_destroy(struct net_device *dev)
 {
     struct ditch_port *port = ditch_port_get_rtnl(dev);
     dev->priv_flags &= ~IFF_DITCH_PORT;
@@ -188,7 +185,7 @@ static void ditch_setup(struct net_device *dev)
 static int ditch_newlink(struct net *src_net, struct net_device *dev,
                     struct nlattr *tb[], struct nlattr *data[])
 {
-    struct ditch_dev *ditch = newdev_priv(dev);
+    struct ditch_dev *ditch = netdev_priv(dev);
     struct ditch_port *port;
     struct net_device *lowerdev;
     int err;
@@ -256,7 +253,8 @@ static void ditch_dellink(struct net_device *dev, struct list_head *head)
 {
     struct ditch_dev *ditch = netdev_priv(dev);
     struct ditch_port *port = ditch->port;
-    list_del_rcu(&ditch->ditches);
+
+    list_del_rcu(&ditch->list);
     unregister_netdevice_queue(dev, head);
     netdev_upper_dev_unlink(ditch->lowerdev, dev);
     port->count -= 1;
@@ -299,24 +297,24 @@ nla_put_failure:
 /* netlink ops */
 static struct rtnl_link_ops ditch_link_ops = {
     .kind       = "ditch",
-    .setup      = ditch_setup;
-    .newlink    = ditch_newlink;
-    .dellink    = ditch_dellink;
-    .priv_size  = sizeof(ditch_dev);
-    .validate   = ditch_validate;
-    .policy     = ditch_policy;
-    .get_size   = ditch_get_size;
-    .fill_info  = ditch_fill_info;
+    .setup      = ditch_setup,
+    .newlink    = ditch_newlink,
+    .dellink    = ditch_dellink,
+    .priv_size  = sizeof(struct ditch_dev),
+    .validate   = ditch_validate,
+    .policy     = ditch_policy,
+    .get_size   = ditch_get_size,
+    .fill_info  = ditch_fill_info,
 };
 
 #define ditch_port_exists(dev) (dev->priv_flags & IFF_DITCH_PORT)
 
 /* notification from notifier */
-static int ditch_device_event(struct notifier_block *unused,i
+static int ditch_device_event(struct notifier_block *unused,
                 unsigned long event, void *ptr)
 {
     struct net_device *dev = ptr;
-    struct ditch_dev *ditch, *next;
+    struct ditch_dev *ditch;
     struct ditch_port *port;
     LIST_HEAD(list_kill);
 
@@ -327,12 +325,12 @@ static int ditch_device_event(struct notifier_block *unused,i
     
     switch (event) {
     case NETDEV_CHANGE:
-        list_for_each_entry(ditch, &port->ditches, list)
+        list_for_each_entry_rcu(ditch, &port->ditches, list)
             netif_stacked_transfer_operstate(ditch->lowerdev,
                             ditch->dev);
         break;
     case NETDEV_FEAT_CHANGE:
-        list_for_each_entry(ditch, &port->ditches, list) {
+        list_for_each_entry_rcu(ditch, &port->ditches, list) {
             ditch->dev->features = dev->features & DITCH_FEATURES;
             ditch->dev->gso_max_size = dev->gso_max_size;
             netdev_features_change(ditch->dev);
@@ -340,10 +338,10 @@ static int ditch_device_event(struct notifier_block *unused,i
         break;
     case NETDEV_UNREGISTER:
 		/* twiddle thumbs on netns device moves */
-        if (dev->reg_state != NETREG_UNREGISTRING)
+        if (dev->reg_state != NETREG_UNREGISTERING)
             break;
 
-        list_for_each_entry(ditch, &port->ditches, list) {
+        list_for_each_entry_rcu(ditch, &port->ditches, list) {
             ditch->dev->rtnl_link_ops->dellink(ditch->dev, &list_kill);
         }
         break;
@@ -355,7 +353,7 @@ static int ditch_device_event(struct notifier_block *unused,i
 
 /* notifier */
 static struct notifier_block ditch_notifier_block __read_mostly = {
-    .notifier_call = ditch_device_event;
+    .notifier_call = ditch_device_event,
 };
 
 /* init */
@@ -374,7 +372,7 @@ register_err:
     return err;
 }
 
-static void __exit ditch_clecnup_module(void)
+static void __exit ditch_cleanup_module(void)
 {
     rtnl_link_unregister(&ditch_link_ops);
     unregister_netdevice_notifier(&ditch_notifier_block);

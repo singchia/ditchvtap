@@ -10,8 +10,12 @@
 #ifndef _LINUX_DITCH_DEV_H
 #define _LINUX_DITCH_DEV_H
 
+#include "ditch.h"
+#include <linux/netdev_features.h>
+#include <linux/netdevice.h>
+
 #define DITCH_FEATURES \
-	(NETIF_F_SG | NETIF_F_ALL_CSUM | NETIF_F_HIGHDMA | NETIF_F_FRAGLIST | \
+	(NETIF_F_SG | NETIF_F_HIGHDMA | NETIF_F_FRAGLIST | \
 	 NETIF_F_GSO | NETIF_F_TSO | NETIF_F_UFO | NETIF_F_GSO_ROBUST | \
 	 NETIF_F_TSO_ECN | NETIF_F_TSO6 | NETIF_F_GRO | NETIF_F_RXCSUM | \
 	 NETIF_F_HW_VLAN_CTAG_FILTER | NETIF_F_HW_VLAN_STAG_FILTER)
@@ -52,6 +56,13 @@ struct ditch_dev {
     struct ditch_pcpu_stats __percpu *pcpu_stats;
 
     DECLARE_BITMAP(ditch_mac_filter, DITCH_MAC_FILTER_SIZE);
+    u16 flags;
 };
+
+struct ditch_dev *ditch_hash_lookup(const struct ditch_port *port,
+                    const unsigned char *addr);
+
+struct ditch_dev *ditch_rss_lookup(const struct ditch_port *port,
+                    struct sk_buff *skb);
 
 #endif /* _LINUX_DITCH_DEV_H */
